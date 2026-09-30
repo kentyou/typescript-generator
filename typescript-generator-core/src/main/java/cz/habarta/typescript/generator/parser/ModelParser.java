@@ -22,10 +22,12 @@ import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -38,6 +40,8 @@ public abstract class ModelParser {
     private final Javadoc javadoc;
     private final DeprecationEnricher deprecationEnricher;
     private final Queue<SourceType<? extends Type>> typeQueue;
+    private final Set<Class<?>> pulledImportedClasses = new LinkedHashSet<>();
+    private final Set<Class<?>> parsedPulledImportedClasses = new LinkedHashSet<>();
     private final TypeProcessor commonTypeProcessor;
     private final List<RestApplicationParser> restApplicationParsers;
 
@@ -81,7 +85,9 @@ public abstract class ModelParser {
         final List<EnumModel> enums = new ArrayList<>();
         SourceType<? extends Type> sourceType;
         while ((sourceType = typeQueue.poll()) != null) {
-            if (parsedTypes.contains(sourceType.type)) {
+            // imported classes pulled by @JsonUnwrapped must be parsed once even if they were already seen as plain references
+            final boolean pendingPulledImported = pulledImportedClasses.contains(sourceType.type) && !parsedPulledImportedClasses.contains(sourceType.type);
+            if (parsedTypes.contains(sourceType.type) && !pendingPulledImported) {
                 continue;
             }
             parsedTypes.add(sourceType.type);
@@ -104,7 +110,8 @@ public abstract class ModelParser {
                 if (sourceType.type instanceof Class<?> && result.getTsType() instanceof TsType.ReferenceType) {
                     final Class<?> cls = (Class<?>) sourceType.type;
                     final TsType.ReferenceType referenceType = (TsType.ReferenceType) result.getTsType();
-                    if (!referenceType.symbol.isResolved()) {
+                    final boolean pulledImported = pulledImportedClasses.contains(cls) && parsedPulledImportedClasses.add(cls);
+                    if (!referenceType.symbol.isResolved() || pulledImported) {
                         TypeScriptGenerator.getLogger().verbose("Parsing '" + cls.getName() + "'" +
                             (sourceType.usedInClass != null ? " used in '" + sourceType.usedInClass.getSimpleName() + "." + sourceType.usedInMember + "'" : ""));
                         final DeclarationModel model = parseClass(sourceType.asSourceClass());
@@ -153,23 +160,23 @@ public abstract class ModelParser {
         }
         if (propertyMember instanceof Constructor) {
             final Constructor<?> constructor = (Constructor<?>) propertyMember;
-            if(constructor.getDeclaringClass().isRecord()) {
-            	Class<?> recordClass = constructor.getDeclaringClass();
-            	try {
-					Constructor<?> canonical = recordClass.getDeclaredConstructor(
-							Arrays.stream(recordClass.getRecordComponents())
-								.map(RecordComponent::getType)
-								.toArray(Class<?>[]::new));
-					if(canonical.equals(constructor)) {
-						// We ignore the canonical constructor in favour of the component access
-						// methods. Any relevant annotations are mirrored to them 
-						return null;
-					}
-				} catch (Exception e) {
-					// This shouldn't be possible. All records must have a
-					// canonical constructor matching their types
-					throw new IllegalArgumentException("The type " + recordClass + " did not have a canonical constructor");
-				}
+            if (constructor.getDeclaringClass().isRecord()) {
+                Class<?> recordClass = constructor.getDeclaringClass();
+                try {
+                    Constructor<?> canonical = recordClass.getDeclaredConstructor(
+                        Arrays.stream(recordClass.getRecordComponents())
+                            .map(RecordComponent::getType)
+                            .toArray(Class<?>[]::new));
+                    if (canonical.equals(constructor)) {
+                        // We ignore the canonical constructor in favour of the component access
+                        // methods. Any relevant annotations are mirrored to them 
+                        return null;
+                    }
+                } catch (Exception e) {
+                    // This shouldn't be possible. All records must have a
+                    // canonical constructor matching their types
+                    throw new IllegalArgumentException("The type " + recordClass + " did not have a canonical constructor");
+                }
             }
             if (creatorIndex != null) {
                 return new PropertyMember(constructor, typeParser.getConstructorParameterTypes(constructor).get(creatorIndex), constructor.getAnnotatedParameterTypes()[creatorIndex], annotationGetter);
@@ -248,6 +255,14 @@ public abstract class ModelParser {
         final List<Class<?>> classes = commonTypeProcessor.discoverClassesUsedInType(resolvedType, typeContext, settings);
         for (Class<?> cls : classes) {
             typeQueue.add(new SourceType<>(cls, usedInClass, name));
+        }
+        if (pullProperties != null) {
+            // flattening needs the bean model even when the class is declared by a module dependency
+            final Class<?> pulledClass = Utils.getRawClassOrNull(resolvedType);
+            if (pulledClass != null && settings.getModuleDependencies().getFullName(pulledClass) != null) {
+                pulledImportedClasses.add(pulledClass);
+                typeQueue.add(new SourceType<>(pulledClass, usedInClass, name));
+            }
         }
         return new PropertyModel(name, resolvedType, optional, access, originalMember, pullProperties, typeContext, comments);
     }

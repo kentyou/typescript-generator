@@ -240,9 +240,12 @@ public class ModelCompiler {
     }
 
     private TsModel processModel(SymbolTable symbolTable, Model model) {
-        final Map<Type, List<BeanModel>> children = createChildrenMap(model);
+        final Map<Type, List<BeanModel>> children = createChildrenMap(symbolTable, model);
         final List<TsBeanModel> beans = new ArrayList<>();
         for (BeanModel bean : model.getBeans()) {
+            if (symbolTable.getSymbolIfImported(bean.getOrigin()) != null) {
+                continue; // declared by a module dependency, kept in the model for @JsonUnwrapped lookups
+            }
             beans.add(processBean(symbolTable, model, children, bean));
         }
         final List<TsEnumModel> enums = new ArrayList<>();
@@ -257,9 +260,12 @@ public class ModelCompiler {
         return new TsModel().withBeans(beans).withEnums(enums).withOriginalStringEnums(stringEnums);
     }
 
-    private Map<Type, List<BeanModel>> createChildrenMap(Model model) {
+    private Map<Type, List<BeanModel>> createChildrenMap(SymbolTable symbolTable, Model model) {
         final Map<Type, List<BeanModel>> children = new LinkedHashMap<>();
         for (BeanModel bean : model.getBeans()) {
+            if (symbolTable.getSymbolIfImported(bean.getOrigin()) != null) {
+                continue;
+            }
             for (Type ancestor : bean.getParentAndInterfaces()) {
                 final Type processedAncestor = Utils.getRawClassOrNull(ancestor);
                 if (!children.containsKey(processedAncestor)) {
@@ -381,6 +387,9 @@ public class ModelCompiler {
                     if (pullBean != null) {
                         properties.addAll(processProperties(symbolTable, model, pullBean, prefix + pullProperties.prefix, pullProperties.suffix + suffix));
                         pulled = true;
+                    } else {
+                        TypeScriptGenerator.getLogger().warning(String.format(
+                            "Cannot flatten @JsonUnwrapped property '%s' of class '%s': type '%s' was not parsed", property.getName(), bean.getOrigin().getName(), ((Class<?>) type).getName()));
                     }
                 }
             }

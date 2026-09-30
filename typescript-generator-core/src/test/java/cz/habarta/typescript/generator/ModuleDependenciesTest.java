@@ -3,7 +3,9 @@ package cz.habarta.typescript.generator;
 
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
+import com.fasterxml.jackson.annotation.JsonUnwrapped;
 import java.io.File;
+import java.time.LocalDate;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -11,6 +13,8 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 
 @SuppressWarnings("unused")
@@ -67,6 +71,83 @@ public class ModuleDependenciesTest {
         Assertions.assertTrue(!output.contains("namespace NS {"));
         Assertions.assertTrue(!output.contains("interface A2 {"));
         Assertions.assertTrue(!output.contains("type Enum1 ="));
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = JsonLibrary.class, names = { "jackson2", "jackson3" })
+    public void testUnwrappedFromModuleDependency(JsonLibrary jsonLibrary) {
+        final String dir = "target/test-module-dependencies-unwrapped-" + jsonLibrary + "/";
+        final Settings settingsA = TestUtils.settings();
+        settingsA.jsonLibrary = jsonLibrary;
+        settingsA.outputKind = TypeScriptOutputKind.module;
+        settingsA.generateNpmPackageJson = true;
+        settingsA.npmName = "a";
+        settingsA.npmVersion = "1.0.0";
+        settingsA.generateInfoJson = true;
+        new TypeScriptGenerator(settingsA).generateTypeScript(
+            Input.from(NameRecord.class, NameBean.class, Other.class),
+            Output.to(new File(dir + "a/a.d.ts")));
+
+        final Settings settingsB = TestUtils.settings();
+        settingsB.jsonLibrary = jsonLibrary;
+        settingsB.outputKind = TypeScriptOutputKind.module;
+        settingsB.generateNpmPackageJson = true;
+        settingsB.npmName = "b";
+        settingsB.npmVersion = "1.0.0";
+        settingsB.moduleDependencies = Arrays.asList(
+            ModuleDependency.module("../a", "a", new File(dir + "a/typescript-generator-info.json"), "a", "1.0.0"));
+        new TypeScriptGenerator(settingsB).generateTypeScript(
+            Input.from(PersonRecord.class, PersonBean.class, PersonPrefixed.class),
+            Output.to(new File(dir + "b/b.d.ts")));
+        final String output = TestUtils.readFile(dir + "b/b.d.ts");
+
+        final String record = section(output, "interface PersonRecord");
+        Assertions.assertTrue(record.contains("first: string;"), output);
+        Assertions.assertTrue(record.contains("last: string;"), output);
+        Assertions.assertTrue(record.contains("other: a.Other;"), output);
+        Assertions.assertTrue(!record.contains("name:"), output);
+        final String bean = section(output, "interface PersonBean");
+        Assertions.assertTrue(bean.contains("first: string;") && bean.contains("last: string;"), output);
+        Assertions.assertTrue(!bean.contains("name:"), output);
+        final String prefixed = section(output, "interface PersonPrefixed");
+        Assertions.assertTrue(prefixed.contains("afirstA: string;") && prefixed.contains("alastA: string;"), output);
+        Assertions.assertTrue(!output.contains("interface NameRecord"), output);
+        Assertions.assertTrue(!output.contains("interface NameBean"), output);
+        Assertions.assertTrue(!output.contains("interface Other"), output);
+    }
+
+    private static String section(String output, String header) {
+        final int start = output.indexOf(header);
+        Assertions.assertTrue(start >= 0, "Missing " + header + " in " + output);
+        return output.substring(start, output.indexOf("}", start));
+    }
+
+    public record NameRecord(String first, String last, Other other) {}
+
+    @SuppressWarnings("NullAway.Init")
+    public static class NameBean {
+        public String first;
+        public String last;
+    }
+
+    @SuppressWarnings("NullAway.Init")
+    public static class Other {
+        public String value;
+    }
+
+    public record PersonRecord(@JsonUnwrapped NameRecord name, LocalDate dateOfBirth) {}
+
+    @SuppressWarnings("NullAway.Init")
+    public static class PersonBean {
+        @JsonUnwrapped
+        public NameBean name;
+        public LocalDate dateOfBirth;
+    }
+
+    @SuppressWarnings("NullAway.Init")
+    public static class PersonPrefixed {
+        @JsonUnwrapped(prefix = "a", suffix = "A")
+        public NameBean name;
     }
 
     @Test
